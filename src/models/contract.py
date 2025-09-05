@@ -1,8 +1,8 @@
 from flask_sqlalchemy import SQLAlchemy
 from datetime import datetime
+from . import db
 import json
 
-db = SQLAlchemy()
 
 class Contract(db.Model):
     id = db.Column(db.Integer, primary_key=True)

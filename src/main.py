@@ -3,7 +3,7 @@ import sys
 # DON'T CHANGE THIS !!!
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from flask import Flask, send_from_directory
+from flask import Flask, send_from_directory, request, jsonify
 from flask_cors import CORS
 from src.models.user import db
 from src.models.contract import Contract, ContractAnalysis, RiskFactor
@@ -53,7 +53,7 @@ def serve(path):
 def health_check():
     return {
         'status': 'healthy',
-        'service': 'ContractCritic API',
+        'service': 'ContractGuard API',
         'version': '1.0.0'
     }
 

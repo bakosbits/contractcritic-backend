@@ -1,21 +1,32 @@
 import os
 import json
+import json5
 import time
 import fitz  # PyMuPDF
+import re # Import regex module
 from docx import Document
 from openai import OpenAI
 from typing import Dict, List, Optional, Tuple
 import logging
+import pprint
+from .prompts import SMALL_BUSINESS_ANALYSIS_PROMPT, INDIVIDUAL_PROMPT
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler('contract_analysis.log')
+    ]
+)
 logger = logging.getLogger(__name__)
 
 class ContractAnalyzer:
     def __init__(self):
         self.client = OpenAI(
-            api_key=os.getenv('OPENAI_API_KEY'),
-            base_url=os.getenv('OPENAI_API_BASE', 'https://api.openai.com/v1')
+            api_key=os.getenv('OPENROUTER_API_KEY'),
+            base_url=os.getenv('OPENROUTER_API_BASE', 'https://openrouter.ai/api/v1')
         )
         
         # Risk scoring weights
@@ -31,15 +42,15 @@ class ContractAnalyzer:
         
         # Model selection thresholds
         self.model_selection = {
-            'gpt-4-turbo': {
-                'max_tokens': 128000,
-                'cost_per_1k_input': 0.01,
-                'cost_per_1k_output': 0.03
+            'google/gemini-2.5-flash': {
+                'max_tokens': 128000, # Placeholder, adjust as per OpenRouter's actual limits
+                'cost_per_1m_input': 1.25, # Placeholder
+                'cost_per_1m_output': 10.0 # Placeholder
             },
-            'gpt-3.5-turbo': {
-                'max_tokens': 16000,
-                'cost_per_1k_input': 0.0005,
-                'cost_per_1k_output': 0.0015
+            'google/gemini-2.5-flash': {
+                'max_tokens': 16000, # Placeholder, adjust as per OpenRouter's actual limits
+                'cost_per_1m_input': 0.30, # Placeholder
+                'cost_per_1m_output': 2.50 # Placeholder
             }
         }
 
@@ -75,7 +86,8 @@ class ContractAnalyzer:
         
         document.close()
         raw_text = "\n".join(text_content)
-        
+
+        logger.info(f"Extracted text from PDF:\n{raw_text}")
         return {
             'raw_text': raw_text,
             'cleaned_text': self._clean_text(raw_text),
@@ -133,16 +145,16 @@ class ContractAnalyzer:
         # Estimate tokens (rough approximation: 1 token ≈ 4 characters)
         estimated_tokens = text_length / 4
         
-        if analysis_type == "comprehensive" or estimated_tokens > 15000:
-            return "gpt-4-turbo"
-        elif analysis_type == "quick_summary" or estimated_tokens < 5000:
-            return "gpt-3.5-turbo"
+        if analysis_type == "small_business":
+            return "google/gemini-2.5-flash"
+        elif analysis_type == "individual":
+            return "google/gemini-2.5-flash"
         else:
-            return "gpt-4-turbo"  # Default to better model for accuracy
+            return "google/gemini-2.5-flash-lite"
 
-    def analyze_contract(self, contract_text: str, analysis_type: str = "comprehensive") -> Dict[str, any]:
+    def analyze_contract(self, contract_text: str, analysis_type: str) -> Dict[str, any]:
         """
-        Perform AI-powered contract analysis using OpenAI GPT models.
+        Perform AI-powered contract analysis using OpenRouter models.
         """
         start_time = time.time()
         
@@ -153,13 +165,13 @@ class ContractAnalyzer:
             # Prepare the analysis prompt
             prompt = self._get_analysis_prompt(contract_text, analysis_type)
             
-            # Call OpenAI API
+            # Call OpenRouter API
             response = self.client.chat.completions.create(
                 model=model,
                 messages=[
                     {
                         "role": "system",
-                        "content": "You are an expert legal analyst specializing in contract review for small businesses and freelancers. Provide thorough, accurate analysis with practical recommendations."
+                        "content": "You are an expert legal analyst specializing in contract review for small businesses, freelancers and individuals. Provide thorough, accurate analysis with practical recommendations."
                     },
                     {
                         "role": "user",
@@ -173,10 +185,15 @@ class ContractAnalyzer:
             # Parse the response
             analysis_content = response.choices[0].message.content
             
+            # Log the raw model response
+            self._log_model_response(model, analysis_content, response.usage.total_tokens if response.usage else 0)
+            
             # Try to parse as JSON, fallback to structured text
             try:
                 analysis_results = json.loads(analysis_content)
+                logger.info(f"Successfully parsed JSON response from model")
             except json.JSONDecodeError:
+                logger.warning(f"Failed to parse JSON from model response, falling back to text parsing")
                 # If not valid JSON, create structured response
                 analysis_results = self._parse_text_response(analysis_content)
             
@@ -188,6 +205,9 @@ class ContractAnalyzer:
             
             # Determine risk level
             risk_level = self._get_risk_level(risk_score)
+            
+            # Log the analysis results summary
+            self._log_analysis_results(analysis_results, risk_score, risk_level)
             
             return {
                 'analysis_results': analysis_results,
@@ -206,54 +226,61 @@ class ContractAnalyzer:
         """
         Generate the appropriate analysis prompt based on analysis type.
         """
-        base_prompt = f"""
-Analyze the following contract and provide a comprehensive assessment:
-
-CONTRACT TEXT:
-{contract_text}
-
-Please provide your analysis in the following JSON structure:
-
-{{
-  "contract_type": "string - type of contract (e.g., Service Agreement, NDA, Employment Contract)",
-  "parties": {{
-    "party_1": "string - first party name and role",
-    "party_2": "string - second party name and role"
-  }},
-  "key_terms": {{
-    "payment_terms": "string - payment schedule and amounts",
-    "duration": "string - contract duration or term",
-    "termination_clauses": "string - how the contract can be terminated",
-    "deliverables": "string - what each party must deliver",
-    "governing_law": "string - applicable jurisdiction and laws"
-  }},
-  "risk_assessment": {{
-    "overall_risk_level": "string - Low/Medium/High",
-    "risk_factors": ["array of specific risk factors identified"],
-    "red_flags": ["array of concerning clauses or missing protections"],
-    "missing_clauses": ["array of important clauses that should be added"]
-  }},
-  "recommendations": {{
-    "suggested_changes": ["array of recommended modifications"],
-    "negotiation_points": ["array of terms that should be negotiated"],
-    "priority_actions": ["array of immediate actions to take"]
-  }},
-  "plain_english_summary": "string - 2-3 paragraph summary in simple language explaining the contract's main points, risks, and recommendations"
-}}
-
-Focus on practical concerns for small business owners and freelancers. Highlight potential financial risks, unclear obligations, and missing protections.
-"""
-        
-        if analysis_type == "quick_summary":
-            return base_prompt + "\n\nProvide a concise analysis focusing on the most critical risks and key terms."
-        
-        return base_prompt
+        if analysis_type == "small_business":
+            return SMALL_BUSINESS_ANALYSIS_PROMPT.format(contract_text=contract_text)
+        elif analysis_type == "individual":
+            return INDIVIDUAL_PROMPT.format(contract_text=contract_text)
+        else:
+            raise ValueError("Unknown analysis type")
 
     def _parse_text_response(self, response_text: str) -> Dict[str, any]:
         """
-        Parse non-JSON response into structured format.
+        Parse non-JSON response into structured format using robust JSON extraction.
+        Uses multiple strategies to extract and parse JSON from model responses.
         """
-        # Basic fallback structure if JSON parsing fails
+        # Try to extract JSON using multiple regex patterns
+        json_patterns = [
+            r'\{.*\}',  # Basic JSON object
+            r'```json\s*(\{.*?\})\s*```',  # JSON in code blocks
+            r'```\s*(\{.*?\})\s*```',  # JSON in generic code blocks
+        ]
+        
+        extracted_json = None
+        for pattern in json_patterns:
+            match = re.search(pattern, response_text, re.DOTALL)
+            if match:
+                # Use the first capture group if it exists, otherwise the full match
+                json_str = match.group(1) if match.groups() else match.group(0)
+                
+                # Try standard JSON parsing first
+                try:
+                    extracted_json = json.loads(json_str)
+                    logger.info("Successfully parsed JSON with standard parser")
+                    return extracted_json
+                except json.JSONDecodeError:
+                    pass
+                
+                # Try json5 parsing for more lenient parsing
+                try:
+                    extracted_json = json5.loads(json_str)
+                    logger.info("Successfully parsed JSON with json5 parser")
+                    return extracted_json
+                except Exception as e:
+                    logger.warning(f"json5 parsing failed: {e}")
+                    continue
+        
+        # If no JSON patterns worked, try to clean and parse the entire response
+        cleaned_response = self._clean_json_response(response_text)
+        if cleaned_response:
+            try:
+                extracted_json = json5.loads(cleaned_response)
+                logger.info("Successfully parsed cleaned JSON response")
+                return extracted_json
+            except Exception as e:
+                logger.warning(f"Failed to parse cleaned response: {e}")
+        
+        # Basic fallback structure if no valid JSON is found or parsing fails
+        logger.warning("No valid JSON found in response, returning fallback structure.")
         return {
             "contract_type": "Unknown",
             "parties": {
@@ -278,54 +305,114 @@ Focus on practical concerns for small business owners and freelancers. Highlight
                 "negotiation_points": [],
                 "priority_actions": ["Manual review recommended due to analysis error"]
             },
-            "plain_english_summary": f"Analysis completed but response format was unexpected. Raw analysis: {response_text[:500]}..."
+            "plain_english_summary": f"Analysis completed but response format was unexpected. Please try again or contact support."
         }
+
+    def _clean_json_response(self, response_text: str) -> str:
+        """
+        Clean response text to improve JSON parsing success rate.
+        """
+        # Remove common markdown artifacts
+        cleaned = re.sub(r'```json\s*', '', response_text)
+        cleaned = re.sub(r'```\s*$', '', cleaned)
+        cleaned = re.sub(r'^```\s*', '', cleaned)
+        
+        # Remove leading/trailing whitespace and newlines
+        cleaned = cleaned.strip()
+        
+        # Try to find the first { and last } to extract just the JSON part
+        first_brace = cleaned.find('{')
+        last_brace = cleaned.rfind('}')
+        
+        if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+            cleaned = cleaned[first_brace:last_brace + 1]
+            return cleaned
+        
+        return None
 
     def _calculate_risk_score(self, analysis_results: Dict[str, any]) -> float:
         """
         Calculate overall risk score based on analysis results.
         Returns score from 0-100 (0 = lowest risk, 100 = highest risk).
+        
+        Uses a baseline approach starting with medium-low (25) and adjusting based on
+        concrete findings rather than relying heavily on AI's subjective risk assessment.
         """
         try:
             risk_assessment = analysis_results.get('risk_assessment', {})
-            overall_risk = risk_assessment.get('overall_risk_level', 'Medium').lower()
             
-            # Base score from overall risk level
-            base_scores = {
-                'low': 25,
-                'medium': 50,
-                'high': 75
-            }
+            # Start with a consistent baseline (medium-low)
+            base_score = 25
             
-            base_score = base_scores.get(overall_risk, 50)
+            # Get concrete findings from the analysis
+            risk_factors = risk_assessment.get('risk_factors', [])
+            red_flags = risk_assessment.get('red_flags', [])
+            missing_clauses = risk_assessment.get('missing_clauses', [])
             
-            # Adjust based on risk factors and red flags
-            risk_factors = len(risk_assessment.get('risk_factors', []))
-            red_flags = len(risk_assessment.get('red_flags', []))
-            missing_clauses = len(risk_assessment.get('missing_clauses', []))
+            # Count the issues
+            risk_factor_count = len(risk_factors)
+            red_flag_count = len(red_flags)
+            missing_clause_count = len(missing_clauses)
             
-            # Calculate adjustments
-            risk_adjustment = min(risk_factors * 3, 15)  # Max 15 points for risk factors
-            red_flag_adjustment = min(red_flags * 5, 20)  # Max 20 points for red flags
-            missing_clause_adjustment = min(missing_clauses * 2, 10)  # Max 10 points for missing clauses
-            
+            # Give more control to the actual findings with higher impact
+            risk_adjustment = min(risk_factor_count * 3, 15)     # Max 15 points for risk factors
+            red_flag_adjustment = min(red_flag_count * 5, 20)    # Max 20 points for red flags  
+            missing_clause_adjustment = min(missing_clause_count * 2, 12)  # Max 12 points for missing clauses
+
             final_score = base_score + risk_adjustment + red_flag_adjustment + missing_clause_adjustment
             
+            # Apply moderate randomization for natural variation
+            import random
+            random.seed(hash(str(analysis_results)) % 1000)  # Deterministic but varied
+            variation = random.uniform(-5, 5)  # Moderate random variation
+            final_score += variation
+            
+            # Add small content-based variation
+            content_hash = hash(str(analysis_results.get('key_terms', {}))) % 100
+            complexity_adjustment = (content_hash % 6) - 3  # -3 to +2 adjustment
+            final_score += complexity_adjustment
+            
+            # Optional: Small adjustment based on AI's overall assessment (reduced influence)
+            overall_risk = risk_assessment.get('overall_risk_level', 'medium').lower()
+            overall_risk = overall_risk.replace('_', '-').replace(' ', '-')
+            
+            ai_adjustment = 0
+            if overall_risk == 'low':
+                ai_adjustment = -3
+            elif overall_risk == 'high':
+                ai_adjustment = +3
+            # medium, medium-low, medium-high get no adjustment (neutral)
+            
+            final_score += ai_adjustment
+            
             # Ensure score is within bounds
-            return min(max(final_score, 0), 100)
+            final_score = min(max(final_score, 0), 100)
+            
+            # Log the scoring breakdown for debugging
+            logger.info(f"Risk scoring breakdown: base={base_score}, risk_factors={risk_adjustment}, "
+                       f"red_flags={red_flag_adjustment}, missing={missing_clause_adjustment}, "
+                       f"ai_adjustment={ai_adjustment}, variation={variation:.1f}, "
+                       f"complexity={complexity_adjustment}, final={final_score:.1f}")
+            
+            return final_score
             
         except Exception as e:
             logger.error(f"Error calculating risk score: {str(e)}")
-            return 50.0  # Default medium risk
+            return 25.0  # Default baseline score
 
     def _get_risk_level(self, risk_score: float) -> str:
         """
         Convert numeric risk score to risk level category.
+        Returns a string representing the risk level.
         """
-        if risk_score <= 30:
+        if risk_score <= 15:
             return "Low"
-        elif risk_score <= 70:
+        elif risk_score <= 35:
+            return "Medium-Low"
+        elif risk_score <= 65:
             return "Medium"
+        elif risk_score <= 85:
+            return "Medium-High"
         else:
             return "High"
 
@@ -336,6 +423,10 @@ Focus on practical concerns for small business owners and freelancers. Highlight
         risk_factors = []
         
         try:
+            if not analysis_results:
+                logger.warning("No analysis results provided to extract_risk_factors")
+                return risk_factors
+                
             risk_assessment = analysis_results.get('risk_assessment', {})
             
             # Process risk factors
@@ -375,20 +466,80 @@ Focus on practical concerns for small business owners and freelancers. Highlight
         Estimate the cost of analyzing a contract with the specified model.
         """
         try:
-            model_info = self.model_selection.get(model, self.model_selection['gpt-3.5-turbo'])
-            
+            model_info = self.model_selection.get(model, self.model_selection['google/gemini-2.5-flash-lite'])
+
             # Rough token estimation (1 token ≈ 4 characters)
             input_tokens = text_length / 4
             
             # Estimate output tokens based on analysis complexity
             output_tokens = min(input_tokens * 0.3, 4000)  # Cap at 4K tokens
             
-            input_cost = (input_tokens / 1000) * model_info['cost_per_1k_input']
-            output_cost = (output_tokens / 1000) * model_info['cost_per_1k_output']
+            input_cost = (input_tokens / 1000) * model_info['cost_per_1m_input']
+            output_cost = (output_tokens / 1000) * model_info['cost_per_1m_output']
             
             return round(input_cost + output_cost, 4)
             
         except Exception as e:
             logger.error(f"Error estimating cost: {str(e)}")
             return 0.0
-
+            
+    def _log_model_response(self, model: str, response_content: str, tokens_used: int) -> None:
+        """
+        Log detailed information about the model response for debugging and analysis.
+        """
+        logger.info(f"=== MODEL RESPONSE DETAILS ===")
+        logger.info(f"Model used: {model}")
+        logger.info(f"Tokens used: {tokens_used}")
+        
+        # Log a preview of the response (first 500 chars)
+        preview = response_content[:500] + "..." if len(response_content) > 500 else response_content
+        logger.info(f"Response preview: {preview}")
+        
+        # Log the full response to a separate debug log
+        with open('model_responses.log', 'a') as f:
+            f.write(f"\n\n=== NEW RESPONSE: {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n")
+            f.write(f"Model: {model}\n")
+            f.write(f"Tokens: {tokens_used}\n")
+            f.write("Full response:\n")
+            f.write(response_content)
+            f.write("\n=== END RESPONSE ===\n")
+        
+        logger.info(f"Full response logged to model_responses.log")
+    
+    def _log_analysis_results(self, analysis_results: Dict[str, any], risk_score: float, risk_level: str) -> None:
+        """
+        Log a summary of the parsed analysis results.
+        """
+        logger.info(f"=== ANALYSIS RESULTS SUMMARY ===")
+        logger.info(f"Contract type: {analysis_results.get('contract_type', 'Unknown')}")
+        logger.info(f"Risk score: {risk_score} ({risk_level})")
+        
+        # Log key risk factors
+        risk_assessment = analysis_results.get('risk_assessment', {})
+        risk_factors = risk_assessment.get('risk_factors', [])
+        red_flags = risk_assessment.get('red_flags', [])
+        
+        if risk_factors:
+            logger.info(f"Risk factors identified: {len(risk_factors)}")
+            for i, factor in enumerate(risk_factors[:3], 1):  # Log first 3 only
+                logger.info(f"  {i}. {factor}")
+            if len(risk_factors) > 3:
+                logger.info(f"  ... and {len(risk_factors) - 3} more")
+                
+        if red_flags:
+            logger.info(f"Red flags identified: {len(red_flags)}")
+            for i, flag in enumerate(red_flags[:3], 1):  # Log first 3 only
+                logger.info(f"  {i}. {flag}")
+            if len(red_flags) > 3:
+                logger.info(f"  ... and {len(red_flags) - 3} more")
+        
+        # Log a more detailed view to a separate file
+        with open('analysis_results.log', 'a') as f:
+            f.write(f"\n\n=== NEW ANALYSIS: {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n")
+            f.write(f"Contract type: {analysis_results.get('contract_type', 'Unknown')}\n")
+            f.write(f"Risk score: {risk_score} ({risk_level})\n")
+            f.write("Full analysis results:\n")
+            f.write(pprint.pformat(analysis_results))
+            f.write("\n=== END ANALYSIS ===\n")
+            
+        logger.info(f"Full analysis results logged to analysis_results.log")

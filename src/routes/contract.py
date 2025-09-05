@@ -129,7 +129,7 @@ def get_contracts():
         # Get query parameters
         user_id = request.args.get('user_id', 1, type=int)
         page = request.args.get('page', 1, type=int)
-        per_page = request.args.get('per_page', 10, type=int)
+        per_page = request.args.get('per_page', 100, type=int)
         status = request.args.get('status')
         
         # Build query
@@ -189,7 +189,7 @@ def get_contract(contract_id):
 def analyze_contract(contract_id):
     """
     Analyze a contract using AI.
-    Request body: {"analysis_type": "comprehensive" | "quick_summary"}
+    Request body: {"analysis_type": "small_business" | "individual"}
     """
     try:
         # Get contract
@@ -197,12 +197,12 @@ def analyze_contract(contract_id):
         
         # Get analysis type from request
         data = request.get_json() or {}
-        analysis_type = data.get('analysis_type', 'comprehensive')
+        analysis_type = data.get('analysis_type', 'small_business')
         
-        if analysis_type not in ['comprehensive', 'quick_summary']:
+        if analysis_type not in ['small_business', 'individual']:
             return jsonify({
                 'success': False,
-                'error': 'Invalid analysis type. Must be "comprehensive" or "quick_summary"'
+                'error': 'Invalid analysis type. Must be "small_business" or "individual"'
             }), 400
         
         # Initialize analyzer
@@ -229,7 +229,7 @@ def analyze_contract(contract_id):
             ai_model_used=analysis_result['ai_model_used'],
             analysis_type=analysis_type,
             risk_score=analysis_result['risk_score'],
-            risk_level=analysis_result['risk_level'],
+            risk_level=analysis_result['risk_level'] if isinstance(analysis_result['risk_level'], str) else str(analysis_result['risk_level']),
             processing_time_ms=analysis_result['processing_time_ms'],
             tokens_used=analysis_result['tokens_used'],
             status='completed'
@@ -402,15 +402,16 @@ def get_dashboard_stats():
         analyzed = Contract.query.filter_by(user_id=user_id, status='analyzed').count()
         error = Contract.query.filter_by(user_id=user_id, status='error').count()
         
-        # Get risk level distribution
+        # Get risk level distribution - group Medium-High and Medium-Low into Medium
         high_risk = db.session.query(ContractAnalysis).join(Contract).filter(
             Contract.user_id == user_id,
             ContractAnalysis.risk_level == 'High'
         ).count()
         
+        # Count all medium variations (Medium, Medium-High, Medium-Low) as medium risk
         medium_risk = db.session.query(ContractAnalysis).join(Contract).filter(
             Contract.user_id == user_id,
-            ContractAnalysis.risk_level == 'Medium'
+            ContractAnalysis.risk_level.in_(['Medium', 'Medium-High', 'Medium-Low'])
         ).count()
         
         low_risk = db.session.query(ContractAnalysis).join(Contract).filter(
@@ -448,4 +449,3 @@ def get_dashboard_stats():
             'success': False,
             'error': 'Internal server error'
         }), 500
-
