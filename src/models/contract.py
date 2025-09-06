@@ -1,120 +1,159 @@
-from flask_sqlalchemy import SQLAlchemy
+"""
+Contract models for Supabase integration.
+
+Note: These are data classes for type hints and validation only.
+Actual database operations are handled by the Supabase client in services/supabase_client.py
+"""
+
 from datetime import datetime
-from . import db
+from typing import Optional, Dict, Any, List
+from dataclasses import dataclass
 import json
 
 
-class Contract(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
-    filename = db.Column(db.String(255), nullable=False)
-    original_filename = db.Column(db.String(255), nullable=False)
-    file_path = db.Column(db.String(500), nullable=False)
-    file_size = db.Column(db.Integer)
-    mime_type = db.Column(db.String(100))
-    contract_type = db.Column(db.String(100))
-    status = db.Column(db.String(50), default='uploaded')
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    
-    # Relationship to analyses
-    analyses = db.relationship('ContractAnalysis', backref='contract', lazy=True, cascade='all, delete-orphan')
+@dataclass
+class Contract:
+    """Contract data model for Supabase integration"""
+    id: Optional[str] = None  # UUID in Supabase
+    user_id: Optional[str] = None  # UUID reference to auth.users
+    original_filename: Optional[str] = None
+    file_size: Optional[int] = None
+    contract_type: Optional[str] = None
+    status: str = 'uploaded'
+    blob_url: Optional[str] = None  # Vercel Blob Storage URL
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    analyses_count: int = 0
 
-    def __repr__(self):
-        return f'<Contract {self.filename}>'
-
-    def to_dict(self):
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for API responses"""
         return {
             'id': self.id,
             'user_id': self.user_id,
-            'filename': self.filename,
             'original_filename': self.original_filename,
             'file_size': self.file_size,
-            'mime_type': self.mime_type,
             'contract_type': self.contract_type,
             'status': self.status,
+            'blob_url': self.blob_url,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None,
-            'analyses_count': len(self.analyses)
+            'analyses_count': self.analyses_count
         }
 
-class ContractAnalysis(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    contract_id = db.Column(db.Integer, db.ForeignKey('contract.id'), nullable=False)
-    ai_model_used = db.Column(db.String(50))
-    analysis_type = db.Column(db.String(50))
-    risk_score = db.Column(db.Float)
-    risk_level = db.Column(db.String(20))
-    analysis_results = db.Column(db.Text)  # JSON string
-    processing_time_ms = db.Column(db.Integer)
-    tokens_used = db.Column(db.Integer)
-    status = db.Column(db.String(50), default='pending')
-    error_message = db.Column(db.Text)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    
-    # Relationship to risk factors
-    risk_factors = db.relationship('RiskFactor', backref='analysis', lazy=True, cascade='all, delete-orphan')
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'Contract':
+        """Create Contract instance from dictionary"""
+        return cls(
+            id=data.get('id'),
+            user_id=data.get('user_id'),
+            original_filename=data.get('original_filename'),
+            file_size=data.get('file_size'),
+            contract_type=data.get('contract_type'),
+            status=data.get('status', 'uploaded'),
+            blob_url=data.get('blob_url'),
+            created_at=datetime.fromisoformat(data['created_at'].replace('Z', '+00:00')) if data.get('created_at') else None,
+            updated_at=datetime.fromisoformat(data['updated_at'].replace('Z', '+00:00')) if data.get('updated_at') else None,
+            analyses_count=data.get('analyses_count', 0)
+        )
 
-    def __repr__(self):
-        return f'<ContractAnalysis {self.id}>'
 
-    def to_dict(self):
-        analysis_data = {}
-        if self.analysis_results:
-            try:
-                analysis_data = json.loads(self.analysis_results)
-            except json.JSONDecodeError:
-                analysis_data = {}
-        
+@dataclass
+class ContractAnalysis:
+    """Contract analysis data model for Supabase integration"""
+    id: Optional[str] = None  # UUID in Supabase
+    contract_id: Optional[str] = None  # UUID reference
+    user_id: Optional[str] = None  # UUID reference to auth.users
+    analysis_type: Optional[str] = None
+    status: str = 'pending'
+    risk_score: Optional[int] = None
+    risk_level: Optional[str] = None
+    analysis_results: Optional[Dict[str, Any]] = None  # JSONB in Supabase
+    processing_time_ms: Optional[int] = None
+    tokens_used: Optional[int] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    risk_factors: List['RiskFactor'] = None
+
+    def __post_init__(self):
+        if self.risk_factors is None:
+            self.risk_factors = []
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for API responses"""
         return {
             'id': self.id,
             'contract_id': self.contract_id,
-            'ai_model_used': self.ai_model_used,
+            'user_id': self.user_id,
             'analysis_type': self.analysis_type,
+            'status': self.status,
             'risk_score': self.risk_score,
             'risk_level': self.risk_level,
-            'analysis_results': analysis_data,
+            'analysis_results': self.analysis_results or {},
             'processing_time_ms': self.processing_time_ms,
             'tokens_used': self.tokens_used,
-            'status': self.status,
-            'error_message': self.error_message,
             'created_at': self.created_at.isoformat() if self.created_at else None,
-            'risk_factors': [rf.to_dict() for rf in self.risk_factors]
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+            'risk_factors': [rf.to_dict() for rf in self.risk_factors] if self.risk_factors else []
         }
 
-    def set_analysis_results(self, results_dict):
-        """Helper method to set analysis results as JSON string"""
-        self.analysis_results = json.dumps(results_dict)
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'ContractAnalysis':
+        """Create ContractAnalysis instance from dictionary"""
+        return cls(
+            id=data.get('id'),
+            contract_id=data.get('contract_id'),
+            user_id=data.get('user_id'),
+            analysis_type=data.get('analysis_type'),
+            status=data.get('status', 'pending'),
+            risk_score=data.get('risk_score'),
+            risk_level=data.get('risk_level'),
+            analysis_results=data.get('analysis_results'),
+            processing_time_ms=data.get('processing_time_ms'),
+            tokens_used=data.get('tokens_used'),
+            created_at=datetime.fromisoformat(data['created_at'].replace('Z', '+00:00')) if data.get('created_at') else None,
+            updated_at=datetime.fromisoformat(data['updated_at'].replace('Z', '+00:00')) if data.get('updated_at') else None,
+            risk_factors=[RiskFactor.from_dict(rf) for rf in data.get('risk_factors', [])]
+        )
 
-    def get_analysis_results(self):
-        """Helper method to get analysis results as dictionary"""
-        if self.analysis_results:
-            try:
-                return json.loads(self.analysis_results)
-            except json.JSONDecodeError:
-                return {}
-        return {}
 
-class RiskFactor(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    analysis_id = db.Column(db.Integer, db.ForeignKey('contract_analysis.id'), nullable=False)
-    category = db.Column(db.String(100))
-    severity = db.Column(db.String(20))  # low, medium, high
-    description = db.Column(db.Text)
-    recommendation = db.Column(db.Text)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+@dataclass
+class RiskFactor:
+    """Risk factor data model for Supabase integration"""
+    id: Optional[str] = None  # UUID in Supabase
+    analysis_id: Optional[str] = None  # UUID reference
+    user_id: Optional[str] = None  # UUID reference to auth.users
+    category: Optional[str] = None
+    severity: Optional[str] = None  # low, medium, high
+    title: Optional[str] = None
+    description: Optional[str] = None
+    recommendation: Optional[str] = None
+    created_at: Optional[datetime] = None
 
-    def __repr__(self):
-        return f'<RiskFactor {self.category}>'
-
-    def to_dict(self):
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for API responses"""
         return {
             'id': self.id,
             'analysis_id': self.analysis_id,
+            'user_id': self.user_id,
             'category': self.category,
             'severity': self.severity,
+            'title': self.title,
             'description': self.description,
             'recommendation': self.recommendation,
             'created_at': self.created_at.isoformat() if self.created_at else None
         }
 
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'RiskFactor':
+        """Create RiskFactor instance from dictionary"""
+        return cls(
+            id=data.get('id'),
+            analysis_id=data.get('analysis_id'),
+            user_id=data.get('user_id'),
+            category=data.get('category'),
+            severity=data.get('severity'),
+            title=data.get('title'),
+            description=data.get('description'),
+            recommendation=data.get('recommendation'),
+            created_at=datetime.fromisoformat(data['created_at'].replace('Z', '+00:00')) if data.get('created_at') else None
+        )

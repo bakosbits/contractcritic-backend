@@ -1,12 +1,13 @@
 import os
 import uuid
 from datetime import datetime
-from flask import Blueprint, request, jsonify, current_app
-from werkzeug.utils import secure_filename
-from src.models.user import db
-from src.models.contract import Contract, ContractAnalysis, RiskFactor
+from flask import Blueprint, request, jsonify, g
+from src.middleware.auth import require_auth, get_current_user
+from src.services.supabase_client import supabase_service
+from src.services.blob_storage import blob_service
 from src.services.contract_analyzer import ContractAnalyzer
 import logging
+import tempfile
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -31,6 +32,7 @@ def get_file_size(file):
     return size
 
 @contract_bp.route('/contracts/upload', methods=['POST'])
+@require_auth
 def upload_contract():
     """
     Upload a contract file for analysis.
@@ -68,43 +70,54 @@ def upload_contract():
                 'error': f'File too large. Maximum size: {MAX_FILE_SIZE // (1024*1024)}MB'
             }), 400
         
-        # Generate secure filename
-        original_filename = file.filename
-        file_extension = os.path.splitext(original_filename)[1]
-        secure_name = str(uuid.uuid4()) + file_extension
+        # Read file content
+        file_content = file.read()
+        file.seek(0)  # Reset for potential re-use
         
-        # Create uploads directory if it doesn't exist
-        upload_dir = os.path.join(current_app.root_path, 'uploads')
-        os.makedirs(upload_dir, exist_ok=True)
-        
-        # Save file
-        file_path = os.path.join(upload_dir, secure_name)
-        file.save(file_path)
-        
-        # Get user_id from request (in a real app, this would come from authentication)
-        user_id = request.form.get('user_id', 1)  # Default to user 1 for demo
-        
-        # Create contract record
-        contract = Contract(
-            user_id=user_id,
-            filename=secure_name,
-            original_filename=original_filename,
-            file_path=file_path,
-            file_size=file_size,
-            mime_type=file.mimetype,
-            status='uploaded'
+        # Upload to Vercel Blob Storage
+        blob_result = blob_service.upload_file(
+            file_content,
+            file.filename,
+            file.mimetype
         )
         
-        db.session.add(contract)
-        db.session.commit()
+        if not blob_result:
+            return jsonify({
+                'success': False,
+                'error': 'Failed to upload file to storage'
+            }), 500
         
-        logger.info(f"Contract uploaded successfully: {contract.id}")
+        # Create contract record in Supabase
+        contract_data = {
+            'user_id': g.user_id,
+            'filename': os.path.basename(blob_result['pathname']) if blob_result.get('pathname') else file.filename,
+            'original_filename': file.filename,
+            'file_url': blob_result['url'],
+            'file_size': file_size,
+            'mime_type': file.mimetype,
+            'status': 'uploaded'
+        }
+        
+        contract = supabase_service.create_contract(contract_data)
+        
+        if not contract:
+            # If contract creation failed, try to clean up the uploaded file
+            try:
+                blob_service.delete_file(blob_result['url'])
+            except:
+                pass
+            return jsonify({
+                'success': False,
+                'error': 'Failed to create contract record'
+            }), 500
+        
+        logger.info(f"Contract uploaded successfully: {contract['id']}")
         
         return jsonify({
             'success': True,
             'data': {
-                'contract_id': contract.id,
-                'filename': original_filename,
+                'contract_id': contract['id'],
+                'filename': file.filename,
                 'file_size': file_size,
                 'status': 'uploaded'
             },
@@ -113,47 +126,51 @@ def upload_contract():
         
     except Exception as e:
         logger.error(f"Error uploading contract: {str(e)}")
-        db.session.rollback()
         return jsonify({
             'success': False,
             'error': 'Internal server error during file upload'
         }), 500
 
 @contract_bp.route('/contracts', methods=['GET'])
+@require_auth
 def get_contracts():
     """
-    Get list of contracts for a user.
-    Query parameters: user_id, page, per_page, status
+    Get list of contracts for the authenticated user.
+    Query parameters: page, per_page, status
     """
     try:
         # Get query parameters
-        user_id = request.args.get('user_id', 1, type=int)
         page = request.args.get('page', 1, type=int)
-        per_page = request.args.get('per_page', 100, type=int)
+        per_page = min(request.args.get('per_page', 100, type=int), 100)  # Cap at 100
         status = request.args.get('status')
         
-        # Build query
-        query = Contract.query.filter_by(user_id=user_id)
+        # Get contracts for the authenticated user
+        contracts = supabase_service.get_user_contracts(g.user_id)
         
+        # Filter by status if provided
         if status:
-            query = query.filter_by(status=status)
+            contracts = [c for c in contracts if c.get('status') == status]
         
-        # Paginate results
-        contracts = query.order_by(Contract.created_at.desc()).paginate(
-            page=page, per_page=per_page, error_out=False
-        )
+        # Sort by created_at descending
+        contracts.sort(key=lambda x: x.get('created_at', ''), reverse=True)
+        
+        # Simple pagination
+        total = len(contracts)
+        start = (page - 1) * per_page
+        end = start + per_page
+        paginated_contracts = contracts[start:end]
         
         return jsonify({
             'success': True,
             'data': {
-                'contracts': [contract.to_dict() for contract in contracts.items],
+                'contracts': paginated_contracts,
                 'pagination': {
                     'page': page,
                     'per_page': per_page,
-                    'total': contracts.total,
-                    'pages': contracts.pages,
-                    'has_next': contracts.has_next,
-                    'has_prev': contracts.has_prev
+                    'total': total,
+                    'pages': (total + per_page - 1) // per_page,
+                    'has_next': end < total,
+                    'has_prev': page > 1
                 }
             }
         }), 200
@@ -165,35 +182,48 @@ def get_contracts():
             'error': 'Internal server error'
         }), 500
 
-@contract_bp.route('/contracts/<int:contract_id>', methods=['GET'])
+@contract_bp.route('/contracts/<contract_id>', methods=['GET'])
+@require_auth
 def get_contract(contract_id):
     """
     Get details of a specific contract.
     """
     try:
-        contract = Contract.query.get_or_404(contract_id)
+        contract = supabase_service.get_contract_by_id(contract_id, g.user_id)
+        
+        if not contract:
+            return jsonify({
+                'success': False,
+                'error': 'Contract not found'
+            }), 404
         
         return jsonify({
             'success': True,
-            'data': contract.to_dict()
+            'data': contract
         }), 200
         
     except Exception as e:
         logger.error(f"Error fetching contract {contract_id}: {str(e)}")
         return jsonify({
             'success': False,
-            'error': 'Contract not found'
-        }), 404
+            'error': 'Internal server error'
+        }), 500
 
-@contract_bp.route('/contracts/<int:contract_id>/analyze', methods=['POST'])
+@contract_bp.route('/contracts/<contract_id>/analyze', methods=['POST'])
+@require_auth
 def analyze_contract(contract_id):
     """
     Analyze a contract using AI.
     Request body: {"analysis_type": "small_business" | "individual"}
     """
     try:
-        # Get contract
-        contract = Contract.query.get_or_404(contract_id)
+        # Verify user owns the contract
+        contract = supabase_service.get_contract_by_id(contract_id, g.user_id)
+        if not contract:
+            return jsonify({
+                'success': False,
+                'error': 'Contract not found'
+            }), 404
         
         # Get analysis type from request
         data = request.get_json() or {}
@@ -205,92 +235,103 @@ def analyze_contract(contract_id):
                 'error': 'Invalid analysis type. Must be "small_business" or "individual"'
             }), 400
         
-        # Initialize analyzer
-        analyzer = ContractAnalyzer()
+        # Update contract status to processing
+        supabase_service.update_contract(contract_id, g.user_id, {'status': 'processing'})
         
-        # Extract text from file
-        logger.info(f"Extracting text from contract {contract_id}")
-        text_data = analyzer.extract_text_from_file(contract.file_path)
+        # Download file from Vercel Blob Storage for analysis
+        import requests
+        file_response = requests.get(contract['file_url'])
+        if file_response.status_code != 200:
+            return jsonify({
+                'success': False,
+                'error': 'Failed to download contract file for analysis'
+            }), 500
         
-        # Update contract with extracted metadata
-        contract.status = 'processing'
-        db.session.commit()
+        # Create temporary file for analysis
+        with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(contract['original_filename'])[1]) as temp_file:
+            temp_file.write(file_response.content)
+            temp_file_path = temp_file.name
         
-        # Perform analysis
-        logger.info(f"Analyzing contract {contract_id} with {analysis_type} analysis")
-        analysis_result = analyzer.analyze_contract(
-            text_data['cleaned_text'], 
-            analysis_type
-        )
-        
-        # Create analysis record
-        analysis = ContractAnalysis(
-            contract_id=contract_id,
-            ai_model_used=analysis_result['ai_model_used'],
-            analysis_type=analysis_type,
-            risk_score=analysis_result['risk_score'],
-            risk_level=analysis_result['risk_level'] if isinstance(analysis_result['risk_level'], str) else str(analysis_result['risk_level']),
-            processing_time_ms=analysis_result['processing_time_ms'],
-            tokens_used=analysis_result['tokens_used'],
-            status='completed'
-        )
-        
-        # Set analysis results
-        analysis.set_analysis_results(analysis_result['analysis_results'])
-        
-        db.session.add(analysis)
-        db.session.flush()  # Get the analysis ID
-        
-        # Extract and save risk factors
-        risk_factors = analyzer.extract_risk_factors(analysis_result['analysis_results'])
-        
-        for factor_data in risk_factors:
-            risk_factor = RiskFactor(
-                analysis_id=analysis.id,
-                category=factor_data['category'],
-                severity=factor_data['severity'],
-                description=factor_data['description'],
-                recommendation=factor_data['recommendation']
+        try:
+            # Initialize analyzer
+            analyzer = ContractAnalyzer()
+            
+            # Extract text from file
+            logger.info(f"Extracting text from contract {contract_id}")
+            text_data = analyzer.extract_text_from_file(temp_file_path)
+            
+            # Perform analysis
+            logger.info(f"Analyzing contract {contract_id} with {analysis_type} analysis")
+            analysis_result = analyzer.analyze_contract(
+                text_data['cleaned_text'], 
+                analysis_type
             )
-            db.session.add(risk_factor)
-        
-        # Update contract status
-        contract.status = 'analyzed'
-        contract.updated_at = datetime.utcnow()
-        
-        db.session.commit()
-        
-        logger.info(f"Contract analysis completed for contract {contract_id}")
-        
-        return jsonify({
-            'success': True,
-            'data': {
-                'analysis_id': analysis.id,
+            
+            # Create analysis record
+            analysis_data = {
                 'contract_id': contract_id,
-                'risk_score': analysis.risk_score,
-                'risk_level': analysis.risk_level,
-                'status': 'completed',
-                'processing_time_ms': analysis.processing_time_ms
-            },
-            'message': 'Contract analysis completed successfully'
-        }), 200
-        
-    except FileNotFoundError:
-        logger.error(f"Contract file not found for contract {contract_id}")
-        return jsonify({
-            'success': False,
-            'error': 'Contract file not found'
-        }), 404
+                'ai_model_used': analysis_result['ai_model_used'],
+                'analysis_type': analysis_type,
+                'risk_score': analysis_result['risk_score'],
+                'risk_level': analysis_result['risk_level'] if isinstance(analysis_result['risk_level'], str) else str(analysis_result['risk_level']),
+                'analysis_results': analysis_result['analysis_results'],  # Supabase handles JSON automatically
+                'processing_time_ms': analysis_result['processing_time_ms'],
+                'tokens_used': analysis_result['tokens_used'],
+                'status': 'completed'
+            }
+            
+            analysis = supabase_service.create_analysis(analysis_data)
+            
+            if not analysis:
+                raise Exception("Failed to create analysis record")
+            
+            # Extract and save risk factors
+            risk_factors = analyzer.extract_risk_factors(analysis_result['analysis_results'])
+            
+            risk_factor_records = []
+            for factor_data in risk_factors:
+                risk_factor_records.append({
+                    'analysis_id': analysis['id'],
+                    'category': factor_data['category'],
+                    'severity': factor_data['severity'],
+                    'description': factor_data['description'],
+                    'recommendation': factor_data['recommendation']
+                })
+            
+            if risk_factor_records:
+                supabase_service.create_risk_factors(risk_factor_records)
+            
+            # Update contract status
+            supabase_service.update_contract(contract_id, g.user_id, {'status': 'analyzed'})
+            
+            logger.info(f"Contract analysis completed for contract {contract_id}")
+            
+            return jsonify({
+                'success': True,
+                'data': {
+                    'analysis_id': analysis['id'],
+                    'contract_id': contract_id,
+                    'risk_score': analysis['risk_score'],
+                    'risk_level': analysis['risk_level'],
+                    'status': 'completed',
+                    'processing_time_ms': analysis['processing_time_ms']
+                },
+                'message': 'Contract analysis completed successfully'
+            }), 200
+            
+        finally:
+            # Clean up temporary file
+            try:
+                os.unlink(temp_file_path)
+            except:
+                pass
         
     except Exception as e:
         logger.error(f"Error analyzing contract {contract_id}: {str(e)}")
         
         # Update contract status to error
         try:
-            contract = Contract.query.get(contract_id)
-            if contract:
-                contract.status = 'error'
-                db.session.commit()
+            supabase_service.update_contract(contract_id, g.user_id, {'status': 'error'})
         except:
             pass
         
@@ -299,26 +340,35 @@ def analyze_contract(contract_id):
             'error': 'Internal server error during analysis'
         }), 500
 
-@contract_bp.route('/contracts/<int:contract_id>/analysis', methods=['GET'])
+@contract_bp.route('/contracts/<contract_id>/analysis', methods=['GET'])
+@require_auth
 def get_contract_analysis(contract_id):
     """
     Get the latest analysis results for a contract.
     """
     try:
-        # Get the latest analysis for this contract
-        analysis = ContractAnalysis.query.filter_by(
-            contract_id=contract_id
-        ).order_by(ContractAnalysis.created_at.desc()).first()
+        # Verify user owns the contract
+        if not supabase_service.verify_user_owns_contract(contract_id, g.user_id):
+            return jsonify({
+                'success': False,
+                'error': 'Contract not found'
+            }), 404
         
-        if not analysis:
+        # Get analyses for this contract
+        analyses = supabase_service.get_contract_analyses(contract_id)
+        
+        if not analyses:
             return jsonify({
                 'success': False,
                 'error': 'No analysis found for this contract'
             }), 404
         
+        # Return the most recent analysis (first in the list due to ordering)
+        latest_analysis = analyses[0]
+        
         return jsonify({
             'success': True,
-            'data': analysis.to_dict()
+            'data': latest_analysis
         }), 200
         
     except Exception as e:
@@ -328,47 +378,69 @@ def get_contract_analysis(contract_id):
             'error': 'Internal server error'
         }), 500
 
-@contract_bp.route('/contracts/<int:contract_id>/analysis/<int:analysis_id>', methods=['GET'])
+@contract_bp.route('/contracts/<contract_id>/analysis/<analysis_id>', methods=['GET'])
+@require_auth
 def get_specific_analysis(contract_id, analysis_id):
     """
     Get a specific analysis by ID.
     """
     try:
-        analysis = ContractAnalysis.query.filter_by(
-            id=analysis_id,
-            contract_id=contract_id
-        ).first_or_404()
+        # Verify user owns the contract
+        if not supabase_service.verify_user_owns_contract(contract_id, g.user_id):
+            return jsonify({
+                'success': False,
+                'error': 'Contract not found'
+            }), 404
+        
+        analysis = supabase_service.get_analysis_by_id(analysis_id)
+        
+        if not analysis or analysis['contract_id'] != contract_id:
+            return jsonify({
+                'success': False,
+                'error': 'Analysis not found'
+            }), 404
         
         return jsonify({
             'success': True,
-            'data': analysis.to_dict()
+            'data': analysis
         }), 200
         
     except Exception as e:
         logger.error(f"Error fetching analysis {analysis_id}: {str(e)}")
         return jsonify({
             'success': False,
-            'error': 'Analysis not found'
-        }), 404
+            'error': 'Internal server error'
+        }), 500
 
-@contract_bp.route('/contracts/<int:contract_id>', methods=['DELETE'])
+@contract_bp.route('/contracts/<contract_id>', methods=['DELETE'])
+@require_auth
 def delete_contract(contract_id):
     """
     Delete a contract and its associated files and analyses.
     """
     try:
-        contract = Contract.query.get_or_404(contract_id)
+        # Get contract to verify ownership and get file URL
+        contract = supabase_service.get_contract_by_id(contract_id, g.user_id)
+        if not contract:
+            return jsonify({
+                'success': False,
+                'error': 'Contract not found'
+            }), 404
         
-        # Delete the physical file
+        # Delete the file from Vercel Blob Storage
         try:
-            if os.path.exists(contract.file_path):
-                os.remove(contract.file_path)
+            blob_service.delete_file(contract['file_url'])
         except Exception as e:
-            logger.warning(f"Could not delete file {contract.file_path}: {str(e)}")
+            logger.warning(f"Could not delete file {contract['file_url']}: {str(e)}")
         
-        # Delete from database (cascades to analyses and risk factors)
-        db.session.delete(contract)
-        db.session.commit()
+        # Delete from Supabase (cascades to analyses and risk factors due to foreign key constraints)
+        success = supabase_service.delete_contract(contract_id, g.user_id)
+        
+        if not success:
+            return jsonify({
+                'success': False,
+                'error': 'Failed to delete contract'
+            }), 500
         
         logger.info(f"Contract {contract_id} deleted successfully")
         
@@ -379,67 +451,62 @@ def delete_contract(contract_id):
         
     except Exception as e:
         logger.error(f"Error deleting contract {contract_id}: {str(e)}")
-        db.session.rollback()
         return jsonify({
             'success': False,
             'error': 'Internal server error'
         }), 500
 
 @contract_bp.route('/dashboard/stats', methods=['GET'])
+@require_auth
 def get_dashboard_stats():
     """
-    Get dashboard statistics for a user.
+    Get dashboard statistics for the authenticated user.
     """
     try:
-        user_id = request.args.get('user_id', 1, type=int)
+        # Get all contracts for the user
+        contracts = supabase_service.get_user_contracts(g.user_id)
         
-        # Get contract counts
-        total_contracts = Contract.query.filter_by(user_id=user_id).count()
+        # Calculate statistics
+        total_contracts = len(contracts)
         
         # Get contracts by status
-        uploaded = Contract.query.filter_by(user_id=user_id, status='uploaded').count()
-        processing = Contract.query.filter_by(user_id=user_id, status='processing').count()
-        analyzed = Contract.query.filter_by(user_id=user_id, status='analyzed').count()
-        error = Contract.query.filter_by(user_id=user_id, status='error').count()
+        status_counts = {}
+        for contract in contracts:
+            status = contract.get('status', 'unknown')
+            status_counts[status] = status_counts.get(status, 0) + 1
         
-        # Get risk level distribution - group Medium-High and Medium-Low into Medium
-        high_risk = db.session.query(ContractAnalysis).join(Contract).filter(
-            Contract.user_id == user_id,
-            ContractAnalysis.risk_level == 'High'
-        ).count()
+        # Get all analyses for user's contracts
+        all_analyses = []
+        for contract in contracts:
+            analyses = supabase_service.get_contract_analyses(contract['id'])
+            all_analyses.extend(analyses)
         
-        # Count all medium variations (Medium, Medium-High, Medium-Low) as medium risk
-        medium_risk = db.session.query(ContractAnalysis).join(Contract).filter(
-            Contract.user_id == user_id,
-            ContractAnalysis.risk_level.in_(['Medium', 'Medium-High', 'Medium-Low'])
-        ).count()
-        
-        low_risk = db.session.query(ContractAnalysis).join(Contract).filter(
-            Contract.user_id == user_id,
-            ContractAnalysis.risk_level == 'Low'
-        ).count()
+        # Calculate risk distribution
+        risk_counts = {'high_risk': 0, 'medium_risk': 0, 'low_risk': 0}
+        for analysis in all_analyses:
+            risk_level = analysis.get('risk_level', '').lower()
+            if risk_level == 'high':
+                risk_counts['high_risk'] += 1
+            elif 'medium' in risk_level:  # Covers Medium, Medium-High, Medium-Low
+                risk_counts['medium_risk'] += 1
+            elif risk_level == 'low':
+                risk_counts['low_risk'] += 1
         
         # Get recent activity (last 5 contracts)
-        recent_contracts = Contract.query.filter_by(
-            user_id=user_id
-        ).order_by(Contract.created_at.desc()).limit(5).all()
+        recent_contracts = sorted(contracts, key=lambda x: x.get('created_at', ''), reverse=True)[:5]
         
         return jsonify({
             'success': True,
             'data': {
                 'total_contracts': total_contracts,
                 'status_breakdown': {
-                    'uploaded': uploaded,
-                    'processing': processing,
-                    'analyzed': analyzed,
-                    'error': error
+                    'uploaded': status_counts.get('uploaded', 0),
+                    'processing': status_counts.get('processing', 0),
+                    'analyzed': status_counts.get('analyzed', 0),
+                    'error': status_counts.get('error', 0)
                 },
-                'risk_distribution': {
-                    'high_risk': high_risk,
-                    'medium_risk': medium_risk,
-                    'low_risk': low_risk
-                },
-                'recent_activity': [contract.to_dict() for contract in recent_contracts]
+                'risk_distribution': risk_counts,
+                'recent_activity': recent_contracts
             }
         }), 200
         

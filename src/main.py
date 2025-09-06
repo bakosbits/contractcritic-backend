@@ -1,14 +1,19 @@
 import os
 import sys
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv(os.path.join(os.path.dirname(os.path.dirname(__file__)), '.env'))
+
 # DON'T CHANGE THIS !!!
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from flask import Flask, send_from_directory, request, jsonify
 from flask_cors import CORS
-from src.models.user import db
-from src.models.contract import Contract, ContractAnalysis, RiskFactor
 from src.routes.user import user_bp
 from src.routes.contract import contract_bp
+from src.services.supabase_client import supabase_service
+from src.services.blob_storage import blob_service
 
 app = Flask(__name__, static_folder=os.path.join(os.path.dirname(__file__), 'static'))
 app.config['SECRET_KEY'] = 'asdf#FGSgvasgf$5$WGT'
@@ -20,17 +25,12 @@ CORS(app, origins="*")
 app.register_blueprint(user_bp, url_prefix='/api')
 app.register_blueprint(contract_bp, url_prefix='/api')
 
-# Database configuration
-app.config['SQLALCHEMY_DATABASE_URI'] = f"sqlite:///{os.path.join(os.path.dirname(__file__), 'database', 'app.db')}"
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-db.init_app(app)
+# Initialize services (they will be initialized when imported)
+# Supabase and Blob storage services are ready to use
 
-# Create uploads directory
-uploads_dir = os.path.join(os.path.dirname(__file__), 'uploads')
-os.makedirs(uploads_dir, exist_ok=True)
-
-with app.app_context():
-    db.create_all()
+# Note: No longer need local uploads directory since we're using Vercel Blob Storage
+# uploads_dir = os.path.join(os.path.dirname(__file__), 'uploads')
+# os.makedirs(uploads_dir, exist_ok=True)
 
 @app.route('/', defaults={'path': ''})
 @app.route('/<path:path>')
