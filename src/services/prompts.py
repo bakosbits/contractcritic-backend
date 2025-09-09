@@ -12,7 +12,7 @@ Please provide your analysis in the following JSON structure. ENSURE THE ENTIRE 
 IMPORTANT: Only extract information that is explicitly present in the contract text. If any field is not present, return "Not specified" or null for that field. Do not infer, guess, or make up any information.
 
 {{
-  "contract_type": "string - type of contract (e.g., Service Agreement, NDA, Employment Contract)",
+  "contract_type": "string - type of contract (e.g., Service Agreement, NDA, Employment Contract)", 
   "parties": {{
     "party_1": "string - first party name and role",
     "party_2": "string - second party name and role"
@@ -30,7 +30,7 @@ IMPORTANT: Only extract information that is explicitly present in the contract t
     "risk_factors": ["array of specific risk factors identified"],
     "red_flags": ["array of concerning clauses or missing protections"],
     "missing_clauses": ["array of important clauses that should be added"]
-  }},
+  }}, 
   "recommendations": {{
     "suggested_changes": ["array of recommended modifications"],
     "negotiation_points": ["array of terms that should be negotiated"],
@@ -58,7 +58,7 @@ CONTRACT TEXT:
 Please provide your analysis in the following JSON structure. ENSURE THE ENTIRE RESPONSE IS VALID JSON
 
 {{
-  "contract_type": "string - type of contract (e.g., Service Agreement, NDA, Employment Contract)",
+  "contract_type": "string - type of contract (e.g., Service Agreement, NDA, Employment Contract)",  
   "parties": {{
     "party_1": "string - first party name and role",
     "party_2": "string - second party name and role"

@@ -47,7 +47,7 @@ class ContractAnalyzer:
                 'cost_per_1m_input': 1.25, # Placeholder
                 'cost_per_1m_output': 10.0 # Placeholder
             },
-            'google/gemini-2.5-flash': {
+            'google/gemini-2.5-flash-lite': {
                 'max_tokens': 16000, # Placeholder, adjust as per OpenRouter's actual limits
                 'cost_per_1m_input': 0.30, # Placeholder
                 'cost_per_1m_output': 2.50 # Placeholder
@@ -148,7 +148,7 @@ class ContractAnalyzer:
         if analysis_type == "small_business":
             return "google/gemini-2.5-flash"
         elif analysis_type == "individual":
-            return "google/gemini-2.5-flash"
+            return "google/gemini-2.5-flash-lite"
         else:
             return "google/gemini-2.5-flash-lite"
 
@@ -282,7 +282,6 @@ class ContractAnalyzer:
         # Basic fallback structure if no valid JSON is found or parsing fails
         logger.warning("No valid JSON found in response, returning fallback structure.")
         return {
-            "contract_type": "Unknown",
             "parties": {
                 "party_1": "Not specified",
                 "party_2": "Not specified"
@@ -300,6 +299,7 @@ class ContractAnalyzer:
                 "red_flags": [],
                 "missing_clauses": []
             },
+            "contract_type": "Unknown",            
             "recommendations": {
                 "suggested_changes": ["Have a legal professional review this contract"],
                 "negotiation_points": [],

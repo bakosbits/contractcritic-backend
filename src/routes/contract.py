@@ -87,7 +87,7 @@ def upload_contract():
                 'error': 'Failed to upload file to storage'
             }), 500
         
-        # Create contract record in Supabase
+        # Create contract record in Supabase with audit logging
         contract_data = {
             'user_id': g.user_id,
             'filename': os.path.basename(blob_result['pathname']) if blob_result.get('pathname') else file.filename,
@@ -98,7 +98,9 @@ def upload_contract():
             'status': 'uploaded'
         }
         
-        contract = supabase_service.create_contract(contract_data)
+        # Extract JWT token for audit logging
+        token = request.headers.get('Authorization').split(' ')[1]
+        contract = supabase_service.create_contract(contract_data, user_jwt=token)
         
         if not contract:
             # If contract creation failed, try to clean up the uploaded file
@@ -144,8 +146,11 @@ def get_contracts():
         per_page = min(request.args.get('per_page', 100, type=int), 100)  # Cap at 100
         status = request.args.get('status')
         
+        # Extract JWT token
+        token = request.headers.get('Authorization').split(' ')[1]
+        
         # Get contracts for the authenticated user
-        contracts = supabase_service.get_user_contracts(g.user_id)
+        contracts = supabase_service.get_user_contracts(user_jwt=token)
         
         # Filter by status if provided
         if status:
@@ -189,7 +194,10 @@ def get_contract(contract_id):
     Get details of a specific contract.
     """
     try:
-        contract = supabase_service.get_contract_by_id(contract_id, g.user_id)
+        # Extract JWT token
+        token = request.headers.get('Authorization').split(' ')[1]
+        
+        contract = supabase_service.get_contract_by_id(contract_id, user_jwt=token)
         
         if not contract:
             return jsonify({
@@ -217,8 +225,11 @@ def analyze_contract(contract_id):
     Request body: {"analysis_type": "small_business" | "individual"}
     """
     try:
+        # Extract JWT token
+        token = request.headers.get('Authorization').split(' ')[1]
+        
         # Verify user owns the contract
-        contract = supabase_service.get_contract_by_id(contract_id, g.user_id)
+        contract = supabase_service.get_contract_by_id(contract_id, user_jwt=token)
         if not contract:
             return jsonify({
                 'success': False,
@@ -235,8 +246,11 @@ def analyze_contract(contract_id):
                 'error': 'Invalid analysis type. Must be "small_business" or "individual"'
             }), 400
         
+        # Extract JWT token for audit logging
+        token = request.headers.get('Authorization').split(' ')[1]
+        
         # Update contract status to processing
-        supabase_service.update_contract(contract_id, g.user_id, {'status': 'processing'})
+        supabase_service.update_contract(contract_id, {'status': 'processing'}, user_jwt=token)
         
         # Download file from Vercel Blob Storage for analysis
         import requests
@@ -279,8 +293,8 @@ def analyze_contract(contract_id):
                 'tokens_used': analysis_result['tokens_used'],
                 'status': 'completed'
             }
-            
-            analysis = supabase_service.create_analysis(analysis_data)
+
+            analysis = supabase_service.create_analysis(analysis_data, user_jwt=token)
             
             if not analysis:
                 raise Exception("Failed to create analysis record")
@@ -299,12 +313,18 @@ def analyze_contract(contract_id):
                 })
             
             if risk_factor_records:
-                supabase_service.create_risk_factors(risk_factor_records)
+                supabase_service.create_risk_factors(risk_factor_records, user_jwt=token)
             
-            # Update contract status
-            supabase_service.update_contract(contract_id, g.user_id, {'status': 'analyzed'})
+            # Extract contract type from analysis results and update contract
+            contract_type = analysis_result['analysis_results'].get('contract_type', 'Unknown')
             
-            logger.info(f"Contract analysis completed for contract {contract_id}")
+            # Update contract status and type
+            supabase_service.update_contract(contract_id, {
+                'status': 'analyzed',
+                'contract_type': contract_type
+            }, user_jwt=token)
+
+            logger.info(f"Contract analysis completed for contract {contract_id}, type: {contract_type}")
             
             return jsonify({
                 'success': True,
@@ -331,7 +351,8 @@ def analyze_contract(contract_id):
         
         # Update contract status to error
         try:
-            supabase_service.update_contract(contract_id, g.user_id, {'status': 'error'})
+            token = request.headers.get('Authorization').split(' ')[1]
+            supabase_service.update_contract(contract_id, {'status': 'error'}, user_jwt=token)
         except:
             pass
         
@@ -347,15 +368,18 @@ def get_contract_analysis(contract_id):
     Get the latest analysis results for a contract.
     """
     try:
+        # Extract JWT token
+        token = request.headers.get('Authorization').split(' ')[1]
+        
         # Verify user owns the contract
-        if not supabase_service.verify_user_owns_contract(contract_id, g.user_id):
+        if not supabase_service.verify_user_owns_contract(contract_id, user_jwt=token):
             return jsonify({
                 'success': False,
                 'error': 'Contract not found'
             }), 404
         
         # Get analyses for this contract
-        analyses = supabase_service.get_contract_analyses(contract_id)
+        analyses = supabase_service.get_contract_analyses(contract_id, user_jwt=token)
         
         if not analyses:
             return jsonify({
@@ -385,14 +409,17 @@ def get_specific_analysis(contract_id, analysis_id):
     Get a specific analysis by ID.
     """
     try:
+        # Extract JWT token
+        token = request.headers.get('Authorization').split(' ')[1]
+        
         # Verify user owns the contract
-        if not supabase_service.verify_user_owns_contract(contract_id, g.user_id):
+        if not supabase_service.verify_user_owns_contract(contract_id, user_jwt=token):
             return jsonify({
                 'success': False,
                 'error': 'Contract not found'
             }), 404
         
-        analysis = supabase_service.get_analysis_by_id(analysis_id)
+        analysis = supabase_service.get_analysis_by_id(analysis_id, user_jwt=token)
         
         if not analysis or analysis['contract_id'] != contract_id:
             return jsonify({
@@ -419,8 +446,11 @@ def delete_contract(contract_id):
     Delete a contract and its associated files and analyses.
     """
     try:
+        # Extract JWT token
+        token = request.headers.get('Authorization').split(' ')[1]
+        
         # Get contract to verify ownership and get file URL
-        contract = supabase_service.get_contract_by_id(contract_id, g.user_id)
+        contract = supabase_service.get_contract_by_id(contract_id, user_jwt=token)
         if not contract:
             return jsonify({
                 'success': False,
@@ -434,7 +464,7 @@ def delete_contract(contract_id):
             logger.warning(f"Could not delete file {contract['file_url']}: {str(e)}")
         
         # Delete from Supabase (cascades to analyses and risk factors due to foreign key constraints)
-        success = supabase_service.delete_contract(contract_id, g.user_id)
+        success = supabase_service.delete_contract(contract_id, user_jwt=token)
         
         if not success:
             return jsonify({
@@ -456,6 +486,92 @@ def delete_contract(contract_id):
             'error': 'Internal server error'
         }), 500
 
+@contract_bp.route('/contracts/batch-update-types', methods=['POST'])
+@require_auth
+def batch_update_contract_types():
+    """
+    Batch update contract types for existing analyzed contracts that are missing contract_type.
+    This is useful for retroactively updating contracts analyzed before the contract_type fix.
+    """
+    try:
+        # Extract JWT token
+        token = request.headers.get('Authorization').split(' ')[1]
+        
+        # Get all analyzed contracts for the user that don't have a contract_type
+        contracts = supabase_service.get_user_contracts(user_jwt=token)
+        
+        # Filter for analyzed contracts without contract_type
+        contracts_to_update = [
+            c for c in contracts 
+            if c.get('status') == 'analyzed' and not c.get('contract_type')
+        ]
+        
+        if not contracts_to_update:
+            return jsonify({
+                'success': True,
+                'data': {
+                    'updated_count': 0,
+                    'message': 'No contracts need contract type updates'
+                }
+            }), 200
+        
+        updated_count = 0
+        errors = []
+        
+        for contract in contracts_to_update:
+            try:
+                # Get the latest analysis for this contract
+                analyses = supabase_service.get_contract_analyses(contract['id'], user_jwt=token)
+                
+                if not analyses:
+                    errors.append(f"No analysis found for contract {contract['id']}")
+                    continue
+                
+                # Get contract type from the latest analysis
+                latest_analysis = analyses[0]
+                analysis_results = latest_analysis.get('analysis_results', {})
+                contract_type = analysis_results.get('contract_type', 'Unknown')
+                
+                # Update the contract with the extracted type
+                success = supabase_service.update_contract(contract['id'], {
+                    'contract_type': contract_type
+                }, user_jwt=token)
+                
+                if success:
+                    updated_count += 1
+                    logger.info(f"Updated contract {contract['id']} with type: {contract_type}")
+                else:
+                    errors.append(f"Failed to update contract {contract['id']}")
+                    
+            except Exception as e:
+                error_msg = f"Error updating contract {contract['id']}: {str(e)}"
+                errors.append(error_msg)
+                logger.error(error_msg)
+        
+        response_data = {
+            'updated_count': updated_count,
+            'total_candidates': len(contracts_to_update),
+            'message': f'Successfully updated {updated_count} out of {len(contracts_to_update)} contracts'
+        }
+        
+        if errors:
+            response_data['errors'] = errors
+            response_data['message'] += f' ({len(errors)} errors occurred)'
+        
+        logger.info(f"Batch contract type update completed: {updated_count}/{len(contracts_to_update)} updated")
+        
+        return jsonify({
+            'success': True,
+            'data': response_data
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error in batch contract type update: {str(e)}")
+        return jsonify({
+            'success': False,
+            'error': 'Internal server error during batch update'
+        }), 500
+
 @contract_bp.route('/dashboard/stats', methods=['GET'])
 @require_auth
 def get_dashboard_stats():
@@ -463,8 +579,11 @@ def get_dashboard_stats():
     Get dashboard statistics for the authenticated user.
     """
     try:
+        # Extract JWT token
+        token = request.headers.get('Authorization').split(' ')[1]
+        
         # Get all contracts for the user
-        contracts = supabase_service.get_user_contracts(g.user_id)
+        contracts = supabase_service.get_user_contracts(user_jwt=token)
         
         # Calculate statistics
         total_contracts = len(contracts)
@@ -478,7 +597,7 @@ def get_dashboard_stats():
         # Get all analyses for user's contracts
         all_analyses = []
         for contract in contracts:
-            analyses = supabase_service.get_contract_analyses(contract['id'])
+            analyses = supabase_service.get_contract_analyses(contract['id'], user_jwt=token)
             all_analyses.extend(analyses)
         
         # Calculate risk distribution
