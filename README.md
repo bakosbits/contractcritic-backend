@@ -28,10 +28,10 @@
 
 ## 🏗️ Architecture
 
-### Backend (Flask)
-- **Framework**: Flask with SQLAlchemy ORM
-- **Database**: SQLite with comprehensive schema
-- **AI Integration**: OpenAI GPT-4 and GPT-3.5 Turbo
+### Backend (fastAPI)
+- **Framework**: FastAPI with Supabase client
+- **Database**: Supabase
+- **AI Integration**: Several
 - **File Processing**: PyMuPDF (PDF), python-docx (Word)
 - **API**: RESTful API with CORS support
 

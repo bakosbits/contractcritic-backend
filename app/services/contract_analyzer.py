@@ -9,11 +9,13 @@ from openai import OpenAI
 from typing import Dict, List, Optional, Tuple
 import logging
 import pprint
+
+from app.core.config import settings
 from .prompts import SMALL_BUSINESS_ANALYSIS_PROMPT, INDIVIDUAL_PROMPT
 
 # Configure logging
 logging.basicConfig(
-    level=logging.INFO,
+    level=getattr(logging, settings.log_level.upper()),
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(),
@@ -25,8 +27,8 @@ logger = logging.getLogger(__name__)
 class ContractAnalyzer:
     def __init__(self):
         self.client = OpenAI(
-            api_key=os.getenv('OPENROUTER_API_KEY'),
-            base_url=os.getenv('OPENROUTER_API_BASE', 'https://openrouter.ai/api/v1')
+            api_key=settings.openrouter_api_key,
+            base_url=settings.openrouter_base_url
         )
         
         # Risk scoring weights

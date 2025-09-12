@@ -1,17 +1,20 @@
 import os
 import uuid
-import requests
+import httpx
 from typing import Optional, Dict, Any
 import mimetypes
 
+from app.core.config import settings
+
+
 class VercelBlobService:
     def __init__(self):
-        self.token = os.getenv("BLOB_READ_WRITE_TOKEN")
+        self.token = settings.blob_read_write_token
         if not self.token:
             raise ValueError("BLOB_READ_WRITE_TOKEN must be set in environment variables")
         self.base_url = "https://blob.vercel-storage.com"
     
-    def upload_file(self, file_content: bytes, filename: str, content_type: str = None) -> Optional[Dict[str, Any]]:
+    async def upload_file(self, file_content: bytes, filename: str, content_type: str = None, user_id: str = None) -> Optional[Dict[str, Any]]:
         """
         Upload file to Vercel Blob Storage and return file info
         
@@ -42,9 +45,61 @@ class VercelBlobService:
                 "x-add-random-suffix": "1"  # Let Vercel add random suffix for uniqueness
             }
             
-            # Upload to Vercel Blob Storage
-            upload_url = f"{self.base_url}/{filename}"  # Use original filename, Vercel will make it unique
+            # Upload to Vercel Blob Storage with user directory
+            upload_url = f"{self.base_url}/users/{user_id}/{filename}"
             
+            async with httpx.AsyncClient() as client:
+                response = await client.put(
+                    upload_url,
+                    content=file_content,
+                    headers=headers
+                )
+            
+            if response.status_code == 200:
+                result = response.json()
+                return {
+                    'url': result.get('url'),
+                    'pathname': result.get('pathname'),
+                    'content_type': result.get('contentType', content_type),
+                    'content_disposition': result.get('contentDisposition'),
+                    'size': len(file_content)
+                }
+            else:
+                print(f"Upload failed with status {response.status_code}: {response.text}")
+                return None
+                
+        except Exception as e:
+            print(f"Error uploading file to Vercel Blob: {e}")
+            return None
+    
+    def upload_file_sync(self, file_content: bytes, filename: str, content_type: str = None, user_id: str = None) -> Optional[Dict[str, Any]]:
+        """
+        Synchronous version of upload_file for compatibility with existing code.
+        """
+        import requests
+        
+        try:
+            # Generate unique filename to avoid conflicts
+            file_extension = os.path.splitext(filename)[1]
+            unique_filename = f"{uuid.uuid4()}{file_extension}"
+            
+            # Guess content type if not provided
+            if not content_type:
+                content_type, _ = mimetypes.guess_type(filename)
+                if not content_type:
+                    content_type = 'application/octet-stream'
+            
+            # Prepare headers
+            headers = {
+                "Authorization": f"Bearer {self.token}",
+                "Content-Type": content_type,
+                "x-content-type": content_type,
+                "x-add-random-suffix": "1"  # Let Vercel add random suffix for uniqueness
+            }
+            
+            # Upload to Vercel Blob Storage
+            upload_url = f"{self.base_url}/users/{user_id}/{filename}"  # Use original filename, Vercel will make it unique
+
             response = requests.put(
                 upload_url,
                 data=file_content,
@@ -68,7 +123,7 @@ class VercelBlobService:
             print(f"Error uploading file to Vercel Blob: {e}")
             return None
     
-    def delete_file(self, file_url: str) -> bool:
+    async def delete_file(self, file_url: str) -> bool:
         """
         Delete file from Vercel Blob Storage
         
@@ -83,8 +138,11 @@ class VercelBlobService:
                 "Authorization": f"Bearer {self.token}"
             }
             
-            # For deletion, we need to use the DELETE method on the file URL
-            response = requests.delete(file_url, headers=headers)
+            delete_url = f"{self.base_url}/delete"
+            
+            # Send DELETE request to the delete endpoint with the file URL in the body
+            async with httpx.AsyncClient() as client:
+                response = await client.post(delete_url, headers=headers, json={"urls": [file_url]})
             
             return response.status_code in [200, 204, 404]  # 404 means already deleted
             
@@ -92,7 +150,29 @@ class VercelBlobService:
             print(f"Error deleting file from Vercel Blob: {e}")
             return False
     
-    def get_file_info(self, file_url: str) -> Optional[Dict[str, Any]]:
+    def delete_file_sync(self, file_url: str) -> bool:
+        """
+        Synchronous version of delete_file for compatibility.
+        """
+        import requests
+        
+        try:
+            headers = {
+                "Authorization": f"Bearer {self.token}"
+            }
+            
+            delete_url = f"{self.base_url}/delete"
+            
+            # Send DELETE request to the delete endpoint with the file URL in the body
+            response = requests.post(delete_url, headers=headers, json={"urls": [file_url]})
+            
+            return response.status_code in [200, 204, 404]  # 404 means already deleted
+            
+        except Exception as e:
+            print(f"Error deleting file from Vercel Blob: {e}")
+            return False
+    
+    async def get_file_info(self, file_url: str) -> Optional[Dict[str, Any]]:
         """
         Get file information from Vercel Blob Storage
         
@@ -107,7 +187,8 @@ class VercelBlobService:
                 "Authorization": f"Bearer {self.token}"
             }
             
-            response = requests.head(file_url, headers=headers)
+            async with httpx.AsyncClient() as client:
+                response = await client.head(file_url, headers=headers)
             
             if response.status_code == 200:
                 return {
@@ -139,7 +220,7 @@ class VercelBlobService:
         # This method is here for future compatibility if signed URLs are needed
         return file_url
     
-    def list_files(self, prefix: str = "") -> Optional[list]:
+    async def list_files(self, prefix: str = "") -> Optional[list]:
         """
         List files in Vercel Blob Storage (if supported)
         
@@ -159,7 +240,8 @@ class VercelBlobService:
             if prefix:
                 list_url += f"?prefix={prefix}"
             
-            response = requests.get(list_url, headers=headers)
+            async with httpx.AsyncClient() as client:
+                response = await client.get(list_url, headers=headers)
             
             if response.status_code == 200:
                 return response.json().get('blobs', [])
@@ -169,6 +251,7 @@ class VercelBlobService:
         except Exception as e:
             print(f"Error listing files from Vercel Blob: {e}")
             return None
+
 
 # Global instance
 blob_service = VercelBlobService()
